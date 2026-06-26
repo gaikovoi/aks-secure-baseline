@@ -6,6 +6,10 @@ targetScope = 'resourceGroup'
 @minLength(79)
 param targetVnetResourceId string
 
+@description('The regional hub VNet Resource ID that the spoke is peered to. Used to link the AKS private DNS zone so that Azure Bastion in the hub can resolve the private API server endpoint.')
+@minLength(79)
+param hubVnetResourceId string
+
 @description('Microsoft Entra group in the identified tenant that will be granted the highly privileged cluster-admin role. If Azure RBAC is used, then this group will get a role assignment to Azure RBAC, else it will be assigned directly to the cluster\'s admin group.')
 param clusterAdminMicrosoftEntraGroupObjectId string
 
@@ -167,6 +171,20 @@ resource targetVirtualNetwork 'Microsoft.Network/virtualNetworks@2023-11-01' exi
   resource snetPrivateCluster 'subnets' existing = {
     name: 'snet-privatecluster'
   }
+}
+
+/*** EXISTING HUB RESOURCES ***/
+
+// Hub resource group
+resource hubResourceGroup 'Microsoft.Resources/resourceGroups@2025-04-01' existing = {
+  scope: subscription()
+  name: split(hubVnetResourceId, '/')[4]
+}
+
+// Hub virtual network
+resource hubVirtualNetwork 'Microsoft.Network/virtualNetworks@2025-07-01' existing = {
+  scope: hubResourceGroup
+  name: last(split(hubVnetResourceId, '/'))
 }
 
 /*** RESOURCES ***/
@@ -685,6 +703,18 @@ resource pdzMc 'Microsoft.Network/privateDnsZones@2024-06-01' = {
       registrationEnabled: false
     }
   }
+
+  @description('Enable hub virtual network private zone DNS lookup for private AKS - required for Azure Bastion to resolve the private API server endpoint.')
+  resource vnetlnkHub 'virtualNetworkLinks' = {
+    name: 'to_${hubVirtualNetwork.name}'
+    location: 'global'
+    properties: {
+      virtualNetwork: {
+        id: hubVirtualNetwork.id
+      }
+      registrationEnabled: false
+    }
+  }
 }
 
 @description('Grant the AKS cluster managed identity to attach custom DNS zone with Private Link information to this virtual network.')
@@ -736,7 +766,7 @@ module policies 'modules/policies.bicep' = {
   }
 }
 
-resource mc 'Microsoft.ContainerService/managedClusters@2024-03-02-preview' = {
+resource mc 'Microsoft.ContainerService/managedClusters@2025-10-01' = {
   name: clusterName
   location: location
   tags: {
@@ -852,7 +882,6 @@ resource mc 'Microsoft.ContainerService/managedClusters@2024-03-02-preview' = {
     }
     nodeResourceGroup: nodeResourceGroup.name
     enableRBAC: true
-    enablePodSecurityPolicy: false
     networkProfile: {
       networkPlugin: 'azure'
       networkPluginMode: 'overlay'
@@ -891,7 +920,7 @@ resource mc 'Microsoft.ContainerService/managedClusters@2024-03-02-preview' = {
     }
     apiServerAccessProfile: {
       authorizedIPRanges: clusterAuthorizedIPRanges // IP authorized ranges can't be applied to the private API server endpoint, they only apply to the public API server.
-      enablePrivateClusterPublicFQDN: true
+      enablePrivateClusterPublicFQDN: false
       enablePrivateCluster: true
       enableVnetIntegration: true
       privateDNSZone: pdzMc.id
